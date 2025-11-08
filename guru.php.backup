@@ -1,0 +1,862 @@
+<?php
+require_once 'config.php';
+
+// Start session if not already started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+// Check if user is logged in and is guru
+if (!isset($_SESSION['user']) || empty($_SESSION['user']) || $_SESSION['user']['role'] !== 'guru') {
+    session_destroy();
+    header('Location: index.php');
+    exit;
+}
+
+$user = $_SESSION['user'];
+$message = '';
+
+// Get teacher info
+$teacher = getOne('teachers', 'user_id = ?', [$user['id']]);
+
+// If teacher info not found, logout
+if (!$teacher) {
+    session_destroy();
+    header('Location: index.php?error=invalid_teacher');
+    exit;
+}
+
+// Handle form submissions
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (isset($_POST['action'])) {
+        switch ($_POST['action']) {
+            case 'save_attendance':
+                // Validate and save attendance array (insert or update if exists)
+                $attendanceJson = $_POST['attendance_data'] ?? '';
+                $attendanceData = json_decode($attendanceJson, true);
+                if (!is_array($attendanceData) || empty($attendanceData)) {
+                    $message = '<div class="alert alert-danger">Data absensi tidak valid.</div>';
+                    break;
+                }
+
+                $saved = 0; $updated = 0; $skipped = 0;
+                foreach ($attendanceData as $data) {
+                    // basic validation
+                    if (empty($data['student_id']) || empty($data['subject_id']) || empty($data['date'])) {
+                        $skipped++;
+                        continue;
+                    }
+
+                    // normalize values
+                    $studentId = (int)$data['student_id'];
+                    $subjectId = (int)$data['subject_id'];
+                    $date = $data['date'];
+                    $status = $data['status'] ?? 'hadir';
+                    $notes = $data['notes'] ?? '';
+
+                    // prevent duplicate entries for same student/subject/date
+                    $existing = getOne('attendances', 'student_id = ? AND subject_id = ? AND date = ?', [$studentId, $subjectId, $date]);
+                    if ($existing) {
+                        // update existing
+                        update('attendances', [
+                            'status' => $status,
+                            'notes' => $notes
+                        ], 'id = ?', [$existing['id']]);
+                        $updated++;
+                    } else {
+                        insert('attendances', [
+                            'student_id' => $studentId,
+                            'subject_id' => $subjectId,
+                            'date' => $date,
+                            'status' => $status,
+                            'notes' => $notes
+                        ]);
+                        $saved++;
+                    }
+                }
+
+                $message = '<div class="alert alert-success">Absensi tersimpan. Baru: ' . $saved . ', Diperbarui: ' . $updated . ', Dilewati: ' . $skipped . '.</div>';
+                break;
+
+            case 'save_grades':
+                // Validate and save grades (insert or update if exists)
+                $gradeJson = $_POST['grade_data'] ?? '';
+                $gradeData = json_decode($gradeJson, true);
+                if (!is_array($gradeData) || empty($gradeData)) {
+                    $message = '<div class="alert alert-danger">Data nilai tidak valid.</div>';
+                    break;
+                }
+
+                $saved = 0; $updated = 0; $skipped = 0;
+                foreach ($gradeData as $data) {
+                    if (empty($data['student_id']) || empty($data['subject_id']) || !isset($data['score'])) {
+                        $skipped++;
+                        continue;
+                    }
+
+                    $studentId = (int)$data['student_id'];
+                    $subjectId = (int)$data['subject_id'];
+                    $assessmentType = $data['assessment_type'] ?? 'tugas';
+                    $score = is_numeric($data['score']) ? floatval($data['score']) : null;
+                    $gradeDate = $data['grade_date'] ?? date('Y-m-d');
+
+                    if ($score === null || $score < 0 || $score > 100) {
+                        $skipped++;
+                        continue;
+                    }
+
+                    // check existing grade for same student/subject/assessment/date
+                    $existing = getOne('grades', 'student_id = ? AND subject_id = ? AND assessment_type = ? AND grade_date = ?', [$studentId, $subjectId, $assessmentType, $gradeDate]);
+                    if ($existing) {
+                        update('grades', [
+                            'score' => $score
+                        ], 'id = ?', [$existing['id']]);
+                        $updated++;
+                    } else {
+                        insert('grades', [
+                            'student_id' => $studentId,
+                            'subject_id' => $subjectId,
+                            'assessment_type' => $assessmentType,
+                            'score' => $score,
+                            'grade_date' => $gradeDate
+                        ]);
+                        $saved++;
+                    }
+                }
+
+                $message = '<div class="alert alert-success">Nilai tersimpan. Baru: ' . $saved . ', Diperbarui: ' . $updated . ', Dilewati: ' . $skipped . '.</div>';
+                break;
+
+            case 'edit_attendance':
+                update('attendances', [
+                    'status' => $_POST['status'],
+                    'notes' => $_POST['notes']
+                ], 'id = ?', [$_POST['attendance_id']]);
+                $message = '<div class="alert alert-success">Kehadiran berhasil diperbarui!</div>';
+                break;
+
+            case 'delete_attendance':
+                delete('attendances', 'id = ?', [$_POST['attendance_id']]);
+                $message = '<div class="alert alert-success">Kehadiran berhasil dihapus!</div>';
+                break;
+
+            case 'edit_grade':
+                update('grades', [
+                    'score' => $_POST['score'],
+                    'assessment_type' => $_POST['assessment_type']
+                ], 'id = ?', [$_POST['grade_id']]);
+                $message = '<div class="alert alert-success">Nilai berhasil diperbarui!</div>';
+                break;
+
+            case 'delete_grade':
+                delete('grades', 'id = ?', [$_POST['grade_id']]);
+                $message = '<div class="alert alert-success">Nilai berhasil dihapus!</div>';
+                break;
+
+            case 'save_report_notes':
+                update('report_cards', [
+                    'homeroom_teacher_notes' => $_POST['notes']
+                ], 'id = ?', [$_POST['report_id']]);
+                $message = '<div class="alert alert-success">Catatan rapor berhasil diperbarui!</div>';
+                break;
+        }
+    }
+}
+
+// Get teacher's classes and subjects
+$teacherSubjects = getAll('teacher_subjects', 'teacher_id = ?', [$teacher['id']]);
+$classIds = array_unique(array_column($teacherSubjects, 'class_id'));
+$classes = [];
+foreach ($classIds as $classId) {
+    $classes[] = getOne('classes', 'id = ?', [$classId]);
+}
+
+// Build subjects list assigned to this teacher (fallback to all subjects)
+$subjects = [];
+$subjectIds = array_unique(array_column($teacherSubjects, 'subject_id'));
+if (!empty($subjectIds)) {
+    foreach ($subjectIds as $sid) {
+        $s = getOne('subjects', 'id = ?', [$sid]);
+        if ($s) $subjects[] = $s;
+    }
+} else {
+    $subjects = getAll('subjects');
+}
+
+// Get homeroom class
+$homeroomClass = getOne('classes', 'homeroom_teacher_id = ?', [$teacher['id']]);
+?>
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guru Dashboard - SIAP-Siswa</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar {
+            min-height: 100vh;
+            background: #343a40;
+            color: white;
+        }
+        .sidebar .nav-link {
+            color: rgba(255,255,255,.75);
+        }
+        .sidebar .nav-link.active {
+            color: white;
+            background: #495057;
+        }
+        .content-wrapper {
+            margin-left: 250px;
+        }
+        @media (max-width: 768px) {
+            .content-wrapper {
+                margin-left: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="d-flex">
+        <!-- Sidebar -->
+        <nav class="sidebar col-md-2 d-none d-md-block">
+            <div class="sidebar-sticky">
+                <div class="p-3">
+                    <h5><i class="fas fa-chalkboard-teacher"></i> SIAP-Siswa</h5>
+                    <p class="mb-4">Guru Dashboard</p>
+                </div>
+                <ul class="nav flex-column">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="#attendance" onclick="showTab('attendance')">
+                            <i class="fas fa-clipboard-check"></i> Attendance
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#grades" onclick="showTab('grades')">
+                            <i class="fas fa-book-open"></i> Grades
+                        </a>
+                    </li>
+                    <?php if ($homeroomClass): ?>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#reports" onclick="showTab('reports')">
+                            <i class="fas fa-file-document"></i> Report Cards
+                        </a>
+                    </li>
+                    <?php endif; ?>
+                    <li class="nav-item mt-4">
+                        <a class="nav-link" href="logout.php">
+                            <i class="fas fa-sign-out-alt"></i> Logout
+                        </a>
+                    </li>
+                </ul>
+            </div>
+        </nav>
+
+        <!-- Main content -->
+        <main class="content-wrapper flex-fill">
+            <div class="container-fluid p-4">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h2>Welcome, <?php echo htmlspecialchars($teacher['full_name']); ?>!</h2>
+                </div>
+
+                <?php echo $message; ?>
+
+                <!-- Attendance Tab -->
+                <div id="attendance-tab" class="tab-content">
+                    <h3>Input Absensi</h3>
+
+                    <?php if (empty($classes)): ?>
+                        <div class="alert alert-warning">Anda belum ditugaskan ke kelas manapun.</div>
+                    <?php endif; ?>
+                    <?php if (empty($subjects)): ?>
+                        <div class="alert alert-warning">Tidak ada mata pelajaran yang terdaftar untuk Anda.</div>
+                    <?php endif; ?>
+
+                    <div class="row mb-4">
+                        <div class="col-md-4">
+                            <label class="form-label">Pilih Kelas</label>
+                            <select class="form-control" id="attendance-class" onchange="loadStudentsForAttendance()">
+                                <option value="">Choose Class</option>
+                                <?php foreach ($classes as $class): ?>
+                                    <option value="<?php echo $class['id']; ?>"><?php echo htmlspecialchars($class['class_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Pilih Mata Pelajaran</label>
+                            <select class="form-control" id="attendance-subject">
+                                <option value="">Choose Subject</option>
+                                <?php foreach ($subjects as $subject): ?>
+                                    <option value="<?php echo $subject['id']; ?>"><?php echo htmlspecialchars($subject['subject_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Tanggal</label>
+                            <input type="date" class="form-control" id="attendance-date" value="<?php echo date('Y-m-d'); ?>">
+                        </div>
+                    </div>
+
+                    <div id="attendance-table" style="display: none;">
+                        <form id="attendance-form" method="POST">
+                            <input type="hidden" name="action" value="save_attendance">
+                            <input type="hidden" name="attendance_data" id="attendance-data">
+                            <div class="table-responsive">
+                                <table class="table table-striped">
+                                    <thead>
+                                        <tr>
+                                            <th>NIS</th>
+                                            <th>Name</th>
+                                            <th>Status</th>
+                                            <th>Notes</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="attendance-students">
+                                    </tbody>
+                                </table>
+                            </div>
+                            <button type="button" class="btn btn-success mt-3" onclick="saveAttendance()">
+                                <i class="fas fa-save"></i> Simpan Absensi
+                            </button>
+                        </form>
+                    </div>
+
+                    <h4 class="mt-5">Riwayat Absensi</h4>
+                    <div class="row mb-4">
+                        <div class="col-md-4">
+                            <label class="form-label">Filter Kelas</label>
+                            <select class="form-control" id="history-attendance-class" onchange="loadAttendanceHistory()">
+                                <option value="">All Classes</option>
+                                <?php foreach ($classes as $class): ?>
+                                    <option value="<?php echo $class['id']; ?>"><?php echo htmlspecialchars($class['class_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Filter Mata Pelajaran</label>
+                            <select class="form-control" id="history-attendance-subject" onchange="loadAttendanceHistory()">
+                                <option value="">All Subjects</option>
+                                <?php foreach ($subjects as $subject): ?>
+                                    <option value="<?php echo $subject['id']; ?>"><?php echo htmlspecialchars($subject['subject_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label">Filter Tanggal</label>
+                            <input type="date" class="form-control" id="history-attendance-date" onchange="loadAttendanceHistory()">
+                        </div>
+                    </div>
+
+                    <div id="attendance-history-table" class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Date</th>
+                                    <th>Student</th>
+                                    <th>Subject</th>
+                                    <th>Status</th>
+                                    <th>Notes</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="attendance-history-body">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Grades Tab -->
+                <div id="grades-tab" class="tab-content" style="display: none;">
+                    <h3>Input Grades</h3>
+
+                    <div class="row mb-4">
+                        <div class="col-md-3">
+                            <label class="form-label">Pilih Kelas</label>
+                            <select class="form-control" id="grades-class" onchange="loadStudentsForGrades()">
+                                <option value="">Choose Class</option>
+                                <?php foreach ($classes as $class): ?>
+                                    <option value="<?php echo $class['id']; ?>"><?php echo htmlspecialchars($class['class_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Pilih Mata Pelajaran</label>
+                            <select class="form-control" id="grades-subject">
+                                <option value="">Choose Subject</option>
+                                <?php foreach ($subjects as $subject): ?>
+                                    <option value="<?php echo $subject['id']; ?>"><?php echo htmlspecialchars($subject['subject_name']); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Tipe Penilaian</label>
+                            <select class="form-control" id="assessment-type">
+                                <option value="tugas">Tugas</option>
+                                <option value="uts">UTS</option>
+                                <option value="uas">UAS</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label">Tanggal</label>
+                            <input type="date" class="form-control" id="grades-date" value="<?php echo date('Y-m-d'); ?>">
+                        </div>
+                    </div>
+
+                    <div id="grades-table" style="display: none;">
+                        <form id="grades-form" method="POST">
+                            <input type="hidden" name="action" value="save_grades">
+                            <input type="hidden" name="grade_data" id="grade-data">
+                            <div class="table-responsive">
+                                <table class="table table-striped">
+                                    <thead>
+                                        <tr>
+                                            <th>NIS</th>
+                                            <th>Name</th>
+                                            <th>Score</th>
+                                        </tr>
+                                    </thead>
+                            <tbody id="grades-students">
+                            </tbody>
+                        </table>
+                    </div>
+                    <button type="button" class="btn btn-success mt-3" onclick="saveGrades()">
+                        <i class="fas fa-save"></i> Simpan Nilai
+                    </button>
+                </form>
+            </div>
+
+            <h4 class="mt-5">Riwayat Nilai</h4>
+            <div class="row mb-4">
+                <div class="col-md-4">
+                    <label class="form-label">Filter Kelas</label>
+                    <select class="form-control" id="history-grades-class" onchange="loadGradesHistory()">
+                        <option value="">All Classes</option>
+                        <?php foreach ($classes as $class): ?>
+                            <option value="<?php echo $class['id']; ?>"><?php echo htmlspecialchars($class['class_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Filter Mata Pelajaran</label>
+                    <select class="form-control" id="history-grades-subject" onchange="loadGradesHistory()">
+                        <option value="">All Subjects</option>
+                        <?php foreach ($subjects as $subject): ?>
+                            <option value="<?php echo $subject['id']; ?>"><?php echo htmlspecialchars($subject['subject_name']); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label">Filter Tipe Penilaian</label>
+                    <select class="form-control" id="history-assessment-type" onchange="loadGradesHistory()">
+                        <option value="">All Types</option>
+                        <option value="tugas">Tugas</option>
+                        <option value="uts">UTS</option>
+                        <option value="uas">UAS</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="grades-history-table" class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Student</th>
+                            <th>Subject</th>
+                            <th>Assessment Type</th>
+                            <th>Score</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="grades-history-body">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Report Cards Tab (Homeroom Teacher) -->
+        <?php if ($homeroomClass): ?>
+        <div id="reports-tab" class="tab-content" style="display: none;">
+            <h3>Report Cards - <?php echo htmlspecialchars($homeroomClass['class_name']); ?></h3>
+
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Student Name</th>
+                            <th>Semester</th>
+                            <th>Academic Year</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php
+                        $students = getAll('students', 'class_id = ?', [$homeroomClass['id']]);
+                        foreach ($students as $student):
+                            $report = getOne('report_cards', 'student_id = ?', [$student['id']]);
+                            if ($report):
+                        ?>
+                            <tr>
+                                <td><?php echo htmlspecialchars($student['full_name']); ?></td>
+                                <td><?php echo htmlspecialchars($report['semester']); ?></td>
+                                <td><?php echo htmlspecialchars($report['academic_year']); ?></td>
+                                <td>
+                                    <button class="btn btn-sm btn-primary" onclick="editReportNotes(<?php echo $report['id']; ?>, '<?php echo addslashes($report['homeroom_teacher_notes'] ?? ''); ?>')">
+                                        Edit Notes
+                                    </button>
+                                </td>
+                            </tr>
+                        <?php
+                            endif;
+                        endforeach;
+                        ?>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <?php endif; ?>
+    </div>
+</main>
+</div>
+
+<!-- Edit Report Notes Modal -->
+<div class="modal fade" id="reportModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Report Card Notes</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="save_report_notes">
+                    <input type="hidden" name="report_id" id="report-id">
+                    <div class="mb-3">
+                        <label class="form-label">Homeroom Teacher Notes</label>
+                        <textarea class="form-control" name="notes" id="report-notes" rows="4"></textarea>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Notes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Attendance Modal -->
+<div class="modal fade" id="editAttendanceModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Attendance</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="edit_attendance">
+                    <input type="hidden" name="attendance_id" id="edit-attendance-id">
+                    <div class="mb-3">
+                        <label class="form-label">Status</label>
+                        <select class="form-control" name="status" id="edit-attendance-status">
+                            <option value="hadir">Hadir</option>
+                            <option value="sakit">Sakit</option>
+                            <option value="izin">Izin</option>
+                            <option value="alpa">Alpa</option>
+                        </select>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Notes</label>
+                        <input type="text" class="form-control" name="notes" id="edit-attendance-notes">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Edit Grade Modal -->
+<div class="modal fade" id="editGradeModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Edit Grade</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <form method="POST">
+                <div class="modal-body">
+                    <input type="hidden" name="action" value="edit_grade">
+                    <input type="hidden" name="grade_id" id="edit-grade-id">
+                    <div class="mb-3">
+                        <label class="form-label">Score</label>
+                        <input type="number" class="form-control" name="score" id="edit-grade-score" min="0" max="100" step="0.01">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">Assessment Type</label>
+                        <select class="form-control" name="assessment_type" id="edit-grade-assessment-type">
+                            <option value="tugas">Tugas</option>
+                            <option value="uts">UTS</option>
+                            <option value="uas">UAS</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">Save Changes</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    let attendanceStudents = [];
+    let gradesStudents = [];
+
+    function showTab(tabName) {
+        const tabs = document.querySelectorAll('.tab-content');
+        tabs.forEach(tab => tab.style.display = 'none');
+        document.getElementById(tabName + '-tab').style.display = 'block';
+
+        const navLinks = document.querySelectorAll('.nav-link');
+        navLinks.forEach(link => link.classList.remove('active'));
+        event.target.classList.add('active');
+    }
+
+    async function loadStudentsForAttendance() {
+        const classId = document.getElementById('attendance-class').value;
+        if (!classId) return;
+
+        const response = await fetch(`api.php/students?filter=class_id,eq,${classId}`);
+        const data = await response.json();
+        attendanceStudents = data.students.records;
+
+        const tbody = document.getElementById('attendance-students');
+        tbody.innerHTML = '';
+
+        attendanceStudents.forEach(student => {
+            const row = `
+                <tr>
+                    <td>${student.nis}</td>
+                    <td>${student.full_name}</td>
+                    <td>
+                        <select class="form-control" id="status-${student.id}">
+                            <option value="hadir">Hadir</option>
+                            <option value="sakit">Sakit</option>
+                            <option value="izin">Izin</option>
+                            <option value="alpa">Alpa</option>
+                        </select>
+                    </td>
+                    <td>
+                        <input type="text" class="form-control" id="notes-${student.id}" placeholder="Notes">
+                    </td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
+
+        document.getElementById('attendance-table').style.display = 'block';
+    }
+
+    async function loadStudentsForGrades() {
+        const classId = document.getElementById('grades-class').value;
+        if (!classId) return;
+
+        const response = await fetch(`api.php/students?filter=class_id,eq,${classId}`);
+        const data = await response.json();
+        gradesStudents = data.students.records;
+
+        const tbody = document.getElementById('grades-students');
+        tbody.innerHTML = '';
+
+        gradesStudents.forEach(student => {
+            const row = `
+                <tr>
+                    <td>${student.nis}</td>
+                    <td>${student.full_name}</td>
+                    <td>
+                        <input type="number" class="form-control" id="score-${student.id}" min="0" max="100" step="0.01">
+                    </td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
+
+        document.getElementById('grades-table').style.display = 'block';
+    }
+
+    function saveAttendance() {
+        const subjectId = document.getElementById('attendance-subject').value;
+        const date = document.getElementById('attendance-date').value;
+
+        const attendanceData = attendanceStudents.map(student => ({
+            student_id: student.id,
+            subject_id: subjectId,
+            date: date,
+            status: document.getElementById(`status-${student.id}`).value,
+            notes: document.getElementById(`notes-${student.id}`).value
+        }));
+
+        document.getElementById('attendance-data').value = JSON.stringify(attendanceData);
+        document.getElementById('attendance-form').submit();
+    }
+
+    function saveGrades() {
+        const subjectId = document.getElementById('grades-subject').value;
+        const assessmentType = document.getElementById('assessment-type').value;
+        const date = document.getElementById('grades-date').value;
+
+        const gradeData = gradesStudents
+            .map(student => ({
+                student_id: student.id,
+                subject_id: subjectId,
+                assessment_type: assessmentType,
+                score: parseFloat(document.getElementById(`score-${student.id}`).value) || 0,
+                grade_date: date
+            }))
+            .filter(grade => grade.score > 0);
+
+        document.getElementById('grade-data').value = JSON.stringify(gradeData);
+        document.getElementById('grades-form').submit();
+    }
+
+    function editReportNotes(reportId, notes) {
+        document.getElementById('report-id').value = reportId;
+        document.getElementById('report-notes').value = notes;
+        new bootstrap.Modal(document.getElementById('reportModal')).show();
+    }
+
+    async function loadAttendanceHistory() {
+        const classId = document.getElementById('history-attendance-class').value;
+        const subjectId = document.getElementById('history-attendance-subject').value;
+        const date = document.getElementById('history-attendance-date').value;
+
+        let url = 'api.php/attendances?';
+        const filters = [];
+        if (classId) filters.push(`filter=class_id,eq,${classId}`);
+        if (subjectId) filters.push(`filter=subject_id,eq,${subjectId}`);
+        if (date) filters.push(`filter=date,eq,${date}`);
+        url += filters.join('&');
+
+        const response = await fetch(url);
+        const data = await response.json();
+        const attendances = data.attendances.records;
+
+        const tbody = document.getElementById('attendance-history-body');
+        tbody.innerHTML = '';
+
+        attendances.forEach(attendance => {
+            const student = attendance.student || {};
+            const subject = attendance.subject || {};
+            const row = `
+                <tr>
+                    <td>${attendance.date}</td>
+                    <td>${student.full_name || 'N/A'}</td>
+                    <td>${subject.subject_name || 'N/A'}</td>
+                    <td>${attendance.status}</td>
+                    <td>${attendance.notes || ''}</td>
+                    <td>
+                        <button class="btn btn-sm btn-warning" onclick="editAttendance(${attendance.id}, '${attendance.status}', '${attendance.notes || ''}')">Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteAttendance(${attendance.id})">Delete</button>
+                    </td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
+    }
+
+    async function loadGradesHistory() {
+        const classId = document.getElementById('history-grades-class').value;
+        const subjectId = document.getElementById('history-grades-subject').value;
+        const assessmentType = document.getElementById('history-assessment-type').value;
+
+        let url = 'api.php/grades?';
+        const filters = [];
+        if (classId) filters.push(`filter=class_id,eq,${classId}`);
+        if (subjectId) filters.push(`filter=subject_id,eq,${subjectId}`);
+        if (assessmentType) filters.push(`filter=assessment_type,eq,${assessmentType}`);
+        url += filters.join('&');
+
+        const response = await fetch(url);
+        const data = await response.json();
+        const grades = data.grades.records;
+
+        const tbody = document.getElementById('grades-history-body');
+        tbody.innerHTML = '';
+
+        grades.forEach(grade => {
+            const student = grade.student || {};
+            const subject = grade.subject || {};
+            const row = `
+                <tr>
+                    <td>${grade.grade_date}</td>
+                    <td>${student.full_name || 'N/A'}</td>
+                    <td>${subject.subject_name || 'N/A'}</td>
+                    <td>${grade.assessment_type}</td>
+                    <td>${grade.score}</td>
+                    <td>
+                        <button class="btn btn-sm btn-warning" onclick="editGrade(${grade.id}, ${grade.score}, '${grade.assessment_type}')">Edit</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteGrade(${grade.id})">Delete</button>
+                    </td>
+                </tr>
+            `;
+            tbody.innerHTML += row;
+        });
+    }
+
+    function editAttendance(attendanceId, status, notes) {
+        document.getElementById('edit-attendance-id').value = attendanceId;
+        document.getElementById('edit-attendance-status').value = status;
+        document.getElementById('edit-attendance-notes').value = notes;
+        new bootstrap.Modal(document.getElementById('editAttendanceModal')).show();
+    }
+
+    function deleteAttendance(attendanceId) {
+        if (confirm('Apakah Anda yakin ingin menghapus kehadiran ini?')) {
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.innerHTML = `
+                <input type="hidden" name="action" value="delete_attendance">
+                <input type="hidden" name="attendance_id" value="${attendanceId}">
+            `;
+            document.body.appendChild(form);
+            form.submit();
+        }
+    }
+
+    function editGrade(gradeId, score, assessmentType) {
+        document.getElementById('edit-grade-id').value = gradeId;
+        document.getElementById('edit-grade-score').value = score;
+        document.getElementById('edit-grade-assessment-type').value = assessmentType;
+        new bootstrap.Modal(document.getElementById('editGradeModal')).show();
+    }
+
+    function deleteGrade(gradeId) {
+        if (confirm('Apakah Anda yakin ingin menghapus nilai ini?')) {
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.innerHTML = `
+                <input type="hidden" name="action" value="delete_grade">
+                <input type="hidden" name="grade_id" value="${gradeId}">
+            `;
+            document.body.appendChild(form);
+            form.submit();
+        }
+    }
+
+    // Load history on page load
+    document.addEventListener('DOMContentLoaded', function() {
+        loadAttendanceHistory();
+        loadGradesHistory();
+    });
+</script>
+</body>
+</html>

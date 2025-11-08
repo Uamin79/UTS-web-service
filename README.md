@@ -139,5 +139,3 @@ siap-siswa/
 ## Lisensi
 
 Proyek ini dibuat untuk tujuan TUGAS UTS - 24.01.53.7009
-
-
